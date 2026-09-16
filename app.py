@@ -30,7 +30,42 @@ t = sp.symbols("t", real=True)
 st.markdown(
     """
     <style>
-      .stApp { background:#ffffff; }
+      /*
+       * Keep MathQuest readable regardless of the Streamlit/browser theme.
+       * Previously only the backgrounds were forced to light colours. A user
+       * with Streamlit's dark theme therefore received white text on a white
+       * page. These variables and selectors make the whole app consistently
+       * high contrast.
+       */
+      :root {
+        color-scheme: light;
+        --mq-text: #172033;
+        --mq-muted: #526174;
+        --mq-border: #cbd5e1;
+        --mq-sidebar: #eef1f5;
+        --mq-white: #ffffff;
+        --mq-accent: #c8102e;
+      }
+
+      html, body, [data-testid="stAppViewContainer"], .stApp {
+        background:#ffffff !important;
+        color:var(--mq-text) !important;
+      }
+
+      /* Native Streamlit text, Markdown and KaTeX inherit the same dark text. */
+      .stApp h1, .stApp h2, .stApp h3, .stApp h4, .stApp h5,
+      .stApp h6, .stApp p, .stApp li, .stApp label,
+      .stApp [data-testid="stMarkdownContainer"],
+      .stApp [data-testid="stCaptionContainer"],
+      .stApp [data-testid="stText"],
+      .stApp .katex, .stApp .katex-display {
+        color:var(--mq-text) !important;
+      }
+
+      .stApp [data-testid="stCaptionContainer"],
+      .stApp small {
+        color:var(--mq-muted) !important;
+      }
 
       .block-container {
         max-width:1450px;
@@ -39,8 +74,110 @@ st.markdown(
       }
 
       [data-testid="stSidebar"] {
-        background:#eef1f5;
+        background:var(--mq-sidebar) !important;
         border-right:1px solid #dde2e8;
+      }
+
+      [data-testid="stSidebar"] > div {
+        background:var(--mq-sidebar) !important;
+      }
+
+      [data-testid="stSidebar"] h1,
+      [data-testid="stSidebar"] h2,
+      [data-testid="stSidebar"] h3,
+      [data-testid="stSidebar"] p,
+      [data-testid="stSidebar"] label,
+      [data-testid="stSidebar"] span,
+      [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] {
+        color:var(--mq-text) !important;
+      }
+
+      /* Radio controls: visible labels and borders in either system theme. */
+      [data-testid="stRadio"] label,
+      [data-testid="stRadio"] label p {
+        color:var(--mq-text) !important;
+      }
+
+      [data-testid="stRadio"] [role="radiogroup"] label > div:first-child {
+        border-color:#475569 !important;
+      }
+
+      /* Select boxes and number inputs. */
+      [data-baseweb="select"] > div,
+      [data-testid="stNumberInput"] input {
+        background:var(--mq-white) !important;
+        color:var(--mq-text) !important;
+        border-color:var(--mq-border) !important;
+      }
+
+      [data-baseweb="select"] *,
+      [data-testid="stNumberInput"] input,
+      [data-testid="stNumberInput"] button,
+      [data-testid="stNumberInput"] button * {
+        color:var(--mq-text) !important;
+      }
+
+      [data-baseweb="popover"],
+      [data-baseweb="menu"],
+      [role="listbox"],
+      [role="option"] {
+        background:var(--mq-white) !important;
+        color:var(--mq-text) !important;
+      }
+
+      /* Tabs need explicit colours because Streamlit theme values vary by user. */
+      [data-baseweb="tab-list"] {
+        border-bottom-color:var(--mq-border) !important;
+      }
+
+      [data-baseweb="tab"] p {
+        color:#475569 !important;
+      }
+
+      [data-baseweb="tab"][aria-selected="true"] p {
+        color:var(--mq-accent) !important;
+        font-weight:700;
+      }
+
+      [data-baseweb="tab-highlight"] {
+        background-color:var(--mq-accent) !important;
+      }
+
+      /* Stable high-contrast button styling. */
+      .stButton > button {
+        background:#ffffff !important;
+        color:#172033 !important;
+        border:1px solid #64748b !important;
+      }
+
+      .stButton > button p,
+      .stButton > button span {
+        color:inherit !important;
+      }
+
+      .stButton > button:hover {
+        background:#f1f5f9 !important;
+        border-color:#334155 !important;
+      }
+
+      .stButton > button[kind="primary"] {
+        background:#b91c1c !important;
+        color:#ffffff !important;
+        border-color:#991b1b !important;
+      }
+
+      .stButton > button[kind="primary"]:hover {
+        background:#991b1b !important;
+      }
+
+      /* Streamlit success/warning/error/info components. */
+      [data-testid="stAlert"] {
+        color:var(--mq-text) !important;
+      }
+
+      [data-testid="stAlert"] p,
+      [data-testid="stAlert"] span {
+        color:inherit !important;
       }
 
       [data-testid="stSidebar"] .block-container {
