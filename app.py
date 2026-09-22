@@ -1,5 +1,6 @@
 
 import base64
+import json
 import math
 import random
 from pathlib import Path
@@ -23,7 +24,8 @@ LOGO_B64 = base64.b64encode(
     (APP_DIR / "assets" / "jcu_logo.png").read_bytes()
 ).decode("ascii")
 
-RNG = random.SystemRandom()
+SEED_RNG = random.SystemRandom()
+RNG = SEED_RNG
 x = sp.symbols("x", real=True)
 t = sp.symbols("t", real=True)
 
@@ -2141,22 +2143,163 @@ def award_xp(problem_id, points):
         st.session_state["xp"] = st.session_state.get("xp", 0) + points
 
 
-def load_problem(topic, level, force_new=False):
-    signature = (topic, level)
+# -----------------------------------------------------------------------------
+# Persistent question state
+# -----------------------------------------------------------------------------
+# Streamlit session_state is intentionally temporary. If a student's browser is
+# inactive long enough for the Streamlit session to expire, session_state can be
+# recreated and the old app would therefore generate a different random problem.
+#
+# To make a question survive that reconnect, MathQuest stores only a compact
+# deterministic random seed (plus topic/level and a short question history) in
+# the page URL. The complete problem is regenerated from that seed on every run.
+# No answer or worked solution is placed in the URL.
+QUESTION_STATE_PARAM = "mq_q"
+QUESTION_STATE_VERSION = 1
+MAX_QUESTION_HISTORY = 30
+TOPIC_ORDER = list(TOPICS.keys())
 
-    if (
-        force_new
-        or "current_problem" not in st.session_state
-        or st.session_state.get("current_signature") != signature
-    ):
-        st.session_state["current_problem"] = unique_problem(
-            GENERATORS[topic],
-            topic,
-            level,
-        )
-        st.session_state["current_signature"] = signature
 
-    return st.session_state["current_problem"]
+def _query_param_value(name):
+    """Read one query parameter without depending on a particular Streamlit API."""
+    try:
+        if hasattr(st, "query_params"):
+            value = st.query_params.get(name, "")
+        else:
+            value = st.experimental_get_query_params().get(name, "")
+    except Exception:
+        return ""
+
+    if isinstance(value, (list, tuple)):
+        value = value[-1] if value else ""
+    return str(value or "")
+
+
+def _set_query_param(name, value):
+    """Update our query parameter while leaving any unrelated parameters alone."""
+    try:
+        if hasattr(st, "query_params"):
+            st.query_params[name] = value
+        else:
+            params = st.experimental_get_query_params()
+            params[name] = value
+            st.experimental_set_query_params(**params)
+    except Exception:
+        # The app still works with normal session_state behaviour if a very old
+        # Streamlit deployment does not permit query-parameter updates.
+        pass
+
+
+def _encode_question_state(state):
+    topic_index = TOPIC_ORDER.index(state["topic"])
+    payload = {
+        "v": QUESTION_STATE_VERSION,
+        "t": topic_index,
+        "l": int(state["level"]),
+        "i": int(state["index"]),
+        "s": [int(seed) for seed in state["seeds"]],
+    }
+    raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _decode_question_state(token):
+    if not token:
+        return None
+
+    try:
+        padded = token + "=" * (-len(token) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded).decode("utf-8"))
+
+        if int(payload.get("v", -1)) != QUESTION_STATE_VERSION:
+            return None
+
+        topic_index = int(payload["t"])
+        if topic_index < 0 or topic_index >= len(TOPIC_ORDER):
+            return None
+
+        topic = TOPIC_ORDER[topic_index]
+        level = int(payload["l"])
+        if level not in TOPICS[topic]:
+            return None
+
+        seeds = [int(seed) for seed in payload.get("s", [])]
+        seeds = [seed for seed in seeds if 0 < seed < 2**63]
+        if not seeds:
+            return None
+
+        # Keep URLs compact even if an older version somehow saved more history.
+        if len(seeds) > MAX_QUESTION_HISTORY:
+            seeds = seeds[-MAX_QUESTION_HISTORY:]
+
+        index = int(payload.get("i", len(seeds) - 1))
+        index = max(0, min(index, len(seeds) - 1))
+
+        return {
+            "topic": topic,
+            "level": level,
+            "seeds": seeds,
+            "index": index,
+        }
+    except Exception:
+        return None
+
+
+def _save_question_state(state):
+    """Trim and persist the current question/history in the browser URL."""
+    seeds = list(state["seeds"])
+    index = int(state["index"])
+
+    if len(seeds) > MAX_QUESTION_HISTORY:
+        remove_count = len(seeds) - MAX_QUESTION_HISTORY
+        seeds = seeds[remove_count:]
+        index = max(0, index - remove_count)
+
+    state = {
+        "topic": state["topic"],
+        "level": int(state["level"]),
+        "seeds": seeds,
+        "index": max(0, min(index, len(seeds) - 1)),
+    }
+    _set_query_param(QUESTION_STATE_PARAM, _encode_question_state(state))
+    return state
+
+
+def _fresh_seed(existing_seeds=()):
+    """Create a new seed, avoiding exact seed reuse in the visible history."""
+    used = set(int(seed) for seed in existing_seeds)
+    for _ in range(100):
+        seed = SEED_RNG.randrange(1, 2**63)
+        if seed not in used:
+            return seed
+    return SEED_RNG.randrange(1, 2**63)
+
+
+def _new_question_state(topic, level):
+    return {
+        "topic": topic,
+        "level": int(level),
+        "seeds": [_fresh_seed()],
+        "index": 0,
+    }
+
+
+def build_problem_from_seed(topic, level, seed):
+    """Regenerate exactly the same problem from a persistent random seed."""
+    global RNG
+
+    previous_rng = RNG
+    RNG = random.Random(int(seed))
+    try:
+        problem = GENERATORS[topic](int(level))
+    finally:
+        RNG = previous_rng
+
+    # A seed-based uid is stable across Streamlit reconnects, but different for
+    # each generated question. It also keeps widget keys tied to the question.
+    problem["uid"] = f"q_{TOPIC_ORDER.index(topic)}_{int(level)}_{int(seed)}"
+    problem["seed"] = int(seed)
+    return problem
 
 
 render_header()
@@ -2174,24 +2317,86 @@ mode = st.sidebar.radio(
 st.sidebar.markdown("---")
 st.sidebar.markdown("## Practice setup")
 
+# Restore the question after a Streamlit inactivity timeout/reconnect.
+question_state = _decode_question_state(
+    _query_param_value(QUESTION_STATE_PARAM)
+)
+if question_state is None:
+    default_topic = TOPIC_ORDER[0]
+    question_state = _save_question_state(
+        _new_question_state(default_topic, TOPICS[default_topic][0])
+    )
+
+restored_topic = question_state["topic"]
 topic = st.sidebar.radio(
     "Topic",
-    list(TOPICS.keys()),
+    TOPIC_ORDER,
+    index=TOPIC_ORDER.index(restored_topic),
 )
+
+level_options = TOPICS[topic]
+if topic == question_state["topic"] and question_state["level"] in level_options:
+    restored_level = question_state["level"]
+else:
+    restored_level = level_options[0]
 
 level = st.sidebar.selectbox(
     "Level",
-    TOPICS[topic],
+    level_options,
+    index=level_options.index(restored_level),
 )
+level = int(level)
+
+# Changing topic/level starts a fresh history for that setup. This mirrors the
+# old app behaviour while ensuring that the selected question itself persists.
+if topic != question_state["topic"] or level != question_state["level"]:
+    question_state = _save_question_state(_new_question_state(topic, level))
 
 new_question = st.sidebar.button(
     "🎲 New random question",
     use_container_width=True,
 )
 
-problem = load_problem(topic, level, force_new=new_question)
+previous_col, next_col = st.sidebar.columns(2)
+previous_question = previous_col.button(
+    "← Previous",
+    use_container_width=True,
+    disabled=question_state["index"] <= 0,
+    help="Return to the previous generated question.",
+)
+next_question = next_col.button(
+    "Next →",
+    use_container_width=True,
+    disabled=question_state["index"] >= len(question_state["seeds"]) - 1,
+    help="Move forward again after using Previous.",
+)
+
+if previous_question:
+    question_state["index"] -= 1
+    question_state = _save_question_state(question_state)
+elif next_question:
+    question_state["index"] += 1
+    question_state = _save_question_state(question_state)
+elif new_question:
+    # If the student went back first, a new question starts a new branch and the
+    # old forward history is discarded, which is the usual browser-history model.
+    question_state["seeds"] = question_state["seeds"][: question_state["index"] + 1]
+    question_state["seeds"].append(
+        _fresh_seed(question_state["seeds"])
+    )
+    question_state["index"] = len(question_state["seeds"]) - 1
+    question_state = _save_question_state(question_state)
+
+current_seed = question_state["seeds"][question_state["index"]]
+problem = build_problem_from_seed(topic, level, current_seed)
 
 st.sidebar.caption(f"Current problem: {problem['title']}")
+st.sidebar.caption(
+    f"Question {question_state['index'] + 1} of {len(question_state['seeds'])} in this history"
+)
+st.sidebar.caption(
+    "The current question is saved in this page URL, so it can be restored after an inactivity timeout or reconnect."
+)
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("## Progress")
@@ -2211,8 +2416,8 @@ else:
 st.sidebar.markdown(f"**XP**  \n{xp}")
 st.sidebar.markdown(f"**Badge**  \n{badge}")
 st.sidebar.markdown(
-    "<div class='skill'>Every new-question click creates a new parameter set. "
-    "MathQuest avoids repeats within the current session.</div>",
+    "<div class='skill'>New questions are kept in a short browser-linked history. "
+    "Use Previous/Next to revisit them; the current question is also restored after a reconnect.</div>",
     unsafe_allow_html=True,
 )
 
