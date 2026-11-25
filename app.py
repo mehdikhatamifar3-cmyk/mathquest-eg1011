@@ -3,6 +3,8 @@ import base64
 import json
 import math
 import random
+import re
+from fractions import Fraction
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -20,9 +22,11 @@ st.set_page_config(
 )
 
 APP_DIR = Path(__file__).resolve().parent
-LOGO_B64 = base64.b64encode(
-    (APP_DIR / "assets" / "jcu_logo.png").read_bytes()
-).decode("ascii")
+LOGO_PATH = APP_DIR / "assets" / "jcu_logo.png"
+LOGO_B64 = (
+    base64.b64encode(LOGO_PATH.read_bytes()).decode("ascii")
+    if LOGO_PATH.is_file() else ""
+)
 
 SEED_RNG = random.SystemRandom()
 RNG = SEED_RNG
@@ -315,6 +319,20 @@ TOPICS = {
     "Vector components": [1, 2, 3, 4],
     "Differentiation": [1, 2, 3, 4, 5],
     "Integration": [1, 2, 3, 4, 5, 6],
+    # Append new topics: existing saved URLs use the original topic indices.
+    "Straight-line equations": list(range(1, 10)),
+}
+
+LINE_LEVELS = {
+    1: "Read a graph",
+    2: "Two known points",
+    3: "One point and a gradient",
+    4: "Axis intercepts",
+    5: "A table of values",
+    6: "Parallel and perpendicular lines",
+    7: "Horizontal and vertical lines",
+    8: "Rearrange a general equation",
+    9: "Engineering graphs and units",
 }
 
 
@@ -327,17 +345,22 @@ def fmt(value, decimals=4):
 
 
 def render_header():
+    logo_html = (
+        f'<img src="data:image/png;base64,{LOGO_B64}" alt="James Cook University">'
+        if LOGO_B64 else '<span style="font-size:30px;font-weight:800;color:#b91c1c">MathQuest</span>'
+    )
     st.markdown(
         f"""
         <div class="app-header">
           <div class="app-header-logo">
-            <img src="data:image/png;base64,{LOGO_B64}" alt="James Cook University">
+            {logo_html}
           </div>
           <div class="app-header-title">
             <h1>MathQuest</h1>
             <p>
               Foundation mathematics practice for EG1011 Statics and Dynamics:
-              equations, trigonometry, vectors, differentiation and integration.
+              equations, straight-line graphs, trigonometry, vectors,
+              differentiation and integration.
             </p>
           </div>
           <div class="app-header-author">
@@ -1933,12 +1956,520 @@ def generate_integration(level):
 
 
 
+# -----------------------------------------------------------------------------
+# Straight-line equations: exact arithmetic, generated graphs and worked steps.
+# All plots below are drawn with Matplotlib; no external images are required.
+# -----------------------------------------------------------------------------
+def line_equation_latex(m, c, x_name="x", y_name="y", vertical=None):
+    if vertical is not None:
+        return rf"{x_name}={sp.latex(vertical)}"
+    return rf"{y_name}={sp.latex(sp.sympify(m) * sp.Symbol(x_name) + c)}"
+
+
+def _line_input_fraction(raw):
+    compact = "".join(str(raw).strip().replace("−", "-").split())
+    if "/" in compact:
+        numerator, denominator = compact.split("/")
+        return Fraction(int(numerator), int(denominator))
+    return Fraction(compact)
+
+
+def line_number_input(raw):
+    """Accept a decimal or a simple fraction, without evaluating Python code."""
+    value = str(raw).strip().replace("−", "-")
+    if len(value) > 64 or not re.fullmatch(
+        r"(?:[+-]?\d+\s*/\s*[+-]?\d+|[+-]?(?:\d+(?:\.\d*)?|\.\d+))", value
+    ):
+        raise ValueError("Enter a number such as -2, 0.75 or -3/4.")
+    try:
+        number = float(_line_input_fraction(value))
+    except (ValueError, ZeroDivisionError, OverflowError):
+        raise ValueError("Use a valid number or fraction with a nonzero denominator.") from None
+    if not math.isfinite(number) or abs(number) > 1e9:
+        raise ValueError("Enter a finite number with magnitude at most 1,000,000,000.")
+    return number
+
+
+def line_answer(label, value, unit=""):
+    answer = make_answer(label, value, unit)
+    # Four decimal places are sufficient, but a visibly different slope is not.
+    answer["tolerance"] = 0.0001
+    return answer
+
+
+def _line_tick_step(span):
+    target = max(float(span) / 12, 1)
+    power = 10 ** math.floor(math.log10(target))
+    return next(mult * power for mult in (1, 2, 5, 10) if mult * power >= target)
+
+
+def straight_line_figure(data, stage="question", candidate=None):
+    """Draw known information separately from solution overlays and attempts."""
+    solved = stage in ("slope", "complete")
+    points = list(data.get("points", []))
+    visible = points if solved else points[:data.get("visible_points", len(points))]
+    m, c = data.get("m"), data.get("c")
+    vertical = data.get("vertical")
+    x_name, y_name = data.get("x_symbol", "x"), data.get("y_symbol", "y")
+
+    xs = [0.0] + [float(p[0]) for p in points]
+    ys = [0.0] + [float(p[1]) for p in points]
+    if c is not None:
+        ys.append(float(c))
+    if data.get("reference"):
+        ref_m, ref_c = data["reference"]
+        ys += [float(ref_c), float(ref_m * points[0][0] + ref_c)]
+    if vertical is not None:
+        xs.append(float(vertical))
+    xspan, yspan = max(max(xs) - min(xs), 6), max(max(ys) - min(ys), 6)
+    xlim = (math.floor(min(xs) - 0.2 * xspan - 1), math.ceil(max(xs) + 0.2 * xspan + 1))
+    ylim = (math.floor(min(ys) - 0.22 * yspan - 1), math.ceil(max(ys) + 0.22 * yspan + 1))
+    if data.get("nonnegative_x"):
+        xlim = (0, xlim[1])
+    xlim = data.get("x_limits", xlim)
+    ylim = data.get("y_limits", ylim)
+
+    fig, ax = plt.subplots(figsize=(8.2, 5.6), facecolor="white")
+    ax.set_facecolor("#f8fafc")
+    ax.set_xlim(*xlim)
+    ax.set_ylim(*ylim)
+    xstep = _line_tick_step(xlim[1] - xlim[0])
+    ystep = _line_tick_step(ylim[1] - ylim[0])
+    xticks = np.arange(math.ceil(xlim[0] / xstep) * xstep, xlim[1] + 0.01, xstep)
+    yticks = np.arange(math.ceil(ylim[0] / ystep) * ystep, ylim[1] + 0.01, ystep)
+    ax.set_xticks(xticks)
+    ax.set_yticks(yticks)
+    if xstep > 1:
+        ax.set_xticks(np.arange(xlim[0], xlim[1] + 0.01, 1), minor=True)
+    if ystep > 1:
+        ax.set_yticks(np.arange(ylim[0], ylim[1] + 0.01, 1), minor=True)
+    ax.grid(which="major", color="#cbd5e1", linewidth=0.8)
+    ax.grid(which="minor", color="#e2e8f0", linewidth=0.45)
+    ax.axhline(0, color="#334155", linewidth=1.2)
+    ax.axvline(0, color="#334155", linewidth=1.2)
+    ax.set_xlabel(data.get("x_label", "x"), fontsize=12, color="#172033")
+    ax.set_ylabel(data.get("y_label", "y"), fontsize=12, color="#172033")
+    ax.tick_params(colors="#334155", labelsize=10)
+    for spine in ax.spines.values():
+        spine.set_color("#94a3b8")
+    domain = np.linspace(*xlim, 300)
+
+    if data.get("reference"):
+        ref_m, ref_c = data["reference"]
+        ax.plot(domain, float(ref_m) * domain + float(ref_c), color="#7c3aed",
+                linestyle="--", linewidth=2, label="Reference line")
+
+    if solved or data.get("given_line", False):
+        label = "Recovered line" if solved else "Given line"
+        if vertical is not None:
+            ax.axvline(float(vertical), color="#2563eb", linewidth=2.5, label=label)
+        else:
+            ax.plot(domain, float(m) * domain + float(c), color="#2563eb",
+                    linewidth=2.5, label=label)
+
+    for index, (px, py) in enumerate(visible):
+        name = chr(ord("A") + index)
+        ax.scatter([float(px)], [float(py)], s=68, color="#be123c", zorder=5)
+        label = name
+        if solved or data.get("label_coordinates", True):
+            label = rf"${name}({sp.latex(px)},\ {sp.latex(py)})$"
+        ax.annotate(label, (float(px), float(py)), xytext=(8, 13 if index % 2 == 0 else -21),
+                    textcoords="offset points", fontsize=11, color="#881337", zorder=7,
+                    bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.85, edgecolor="none"))
+
+    if solved and vertical is None and len(points) >= 2:
+        (x1, y1), (x2, y2) = points[:2]
+        dx, dy = x2 - x1, y2 - y1
+        ax.plot([float(x1), float(x2), float(x2)], [float(y1), float(y1), float(y2)],
+                color="#d97706", linestyle="--", linewidth=2, zorder=4)
+        ax.annotate(rf"$\Delta {x_name}={sp.latex(dx)}$",
+                    (float((x1 + x2) / 2), float(y1)), xytext=(0, -29),
+                    textcoords="offset points", ha="center", color="#92400e", fontsize=12,
+                    bbox=dict(facecolor="white", edgecolor="none", alpha=0.9, pad=2))
+        if dy != 0:
+            ax.annotate(rf"$\Delta {y_name}={sp.latex(dy)}$",
+                        (float(x2), float((y1 + y2) / 2)), xytext=(9, 0),
+                        textcoords="offset points", va="center", color="#92400e", fontsize=12,
+                        bbox=dict(facecolor="white", edgecolor="none", alpha=0.9, pad=2))
+        else:
+            ax.annotate(rf"$\Delta {y_name}=0$", (float(x2), float(y1)), xytext=(8, 14),
+                        textcoords="offset points", color="#92400e", fontsize=12)
+
+    if stage == "complete" and vertical is None:
+        ax.scatter([0], [float(c)], s=90, marker="s", color="#059669", zorder=6,
+                   label=rf"Intercept $c={sp.latex(c)}$")
+
+    if candidate is not None:
+        if candidate.get("vertical") is not None:
+            ax.axvline(candidate["vertical"], color="#ea580c", linestyle=":",
+                       linewidth=2.6, label="Your equation")
+        else:
+            ax.plot(domain, candidate["m"] * domain + candidate["c"], color="#ea580c",
+                    linestyle=":", linewidth=2.6, label="Your equation")
+
+    if stage == "complete":
+        equation = line_equation_latex(m, c, x_name, y_name, vertical)
+        title = rf"Recovered equation: ${equation}$"
+    elif stage == "slope":
+        title = "Read the signed changes: vertical change / horizontal change"
+    else:
+        title = data.get("graph_title", "Use the axis values to read the known information")
+    ax.set_title(title, fontsize=12, color="#172033", pad=14)
+    handles, labels = ax.get_legend_handles_labels()
+    if handles:
+        ax.legend(handles, labels, loc="best", fontsize=9, facecolor="white", framealpha=0.94)
+    fig.text(0.5, 0.015, "Use axis values: horizontal and vertical scales may differ. Minor grid spacing, when shown: 1 unit.",
+             ha="center", fontsize=9, color="#475569")
+    # Fixed margins keep axis labels inside the canvas even when annotations
+    # sit near an axis boundary; they also give every learning graph room.
+    fig.subplots_adjust(left=0.14, right=0.97, bottom=0.16, top=0.90)
+    ax.yaxis.set_label_coords(-0.10, 0.5)
+    return fig
+
+
+def show_straight_line(data, stage="question", candidate=None):
+    fig = straight_line_figure(data, stage, candidate)
+    st.pyplot(fig, use_container_width=True)
+    plt.close(fig)
+
+
+def _line_formula_question(correct, explanation):
+    options = [correct, "Use y/x from any single point, even if the line misses the origin",
+               "Use horizontal change divided by vertical change",
+               "Assume the vertical-axis intercept is always zero"]
+    RNG.shuffle(options)
+    return {"question": "Which method fits the information given?", "options": options,
+            "correct": correct, "explanation": explanation}
+
+
+def _line_gradient_steps(points, x_name="x", y_name="y"):
+    (x1, y1), (x2, y2) = points[:2]
+    dx, dy = sp.simplify(x2 - x1), sp.simplify(y2 - y1)
+    m = sp.simplify(dy / dx)
+    return [
+        ("heading", "2. Calculate the gradient from changes"),
+        ("text", "Move from A to B. Subtract the coordinates in the same order in the numerator and denominator. The gradient is vertical change divided by horizontal change."),
+        ("latex", rf"\Delta {x_name}=({sp.latex(x2)})-({sp.latex(x1)})={sp.latex(dx)}"),
+        ("latex", rf"\Delta {y_name}=({sp.latex(y2)})-({sp.latex(y1)})={sp.latex(dy)}"),
+        ("latex", rf"m=\frac{{\Delta {y_name}}}{{\Delta {x_name}}}"
+                  rf"=\frac{{({sp.latex(y2)})-({sp.latex(y1)})}}{{({sp.latex(x2)})-({sp.latex(x1)})}}"
+                  rf"=\frac{{{sp.latex(dy)}}}{{{sp.latex(dx)}}}={sp.latex(m)}"),
+        ("text", "A positive gradient rises as you move right; a negative gradient falls. A zero gradient gives a horizontal line. Use the numbered axes, rather than the apparent angle on the screen."),
+        ("line_plot", "slope"),
+    ]
+
+
+def generate_straight_line(level):
+    """Generate consistent exact data, answer checks and a matching explanation."""
+    slopes = [sp.Rational(n, d) for n, d in [(-3, 1), (-2, 1), (-1, 1), (-1, 2),
+                                            (1, 2), (1, 1), (2, 1), (3, 1),
+                                            (2, 3), (-2, 3), (3, 2), (-3, 2)]]
+    m = RNG.choice(slopes)
+    c = sp.Integer(RNG.randint(-5, 5))
+    denominator = int(sp.denom(m))
+    x1 = sp.Integer(RNG.choice([-3, -2, -1, 1, 2]) * denominator)
+    x2 = x1 + denominator * RNG.choice([1, 2, 3])
+    # Keep the first graph approachable: two nonzero x-values and integer points.
+    if level == 1:
+        x1, x2 = -sp.Integer(denominator), sp.Integer(denominator)
+    points = [(x1, m * x1 + c), (x2, m * x2 + c)]
+    data = {"m": m, "c": c, "vertical": None, "points": points,
+            "given_line": level == 1, "label_coordinates": level != 1}
+    prefix = []
+    table = None
+    form_answer = None
+    x_name, y_name = "x", "y"
+    m_unit = c_unit = ""
+
+    if level == 1:
+        title = "Recover a line equation from its graph"
+        prompt = "Read the coordinates of the marked points A and B from the graph. Find the gradient m and the intercept c, then write the complete equation y = mx + c. The equation is deliberately hidden on the graph."
+        first_step = "Read two exact grid intersections on the blue line. A coordinate pair is written (horizontal value, vertical value). The marked points have integer coordinates."
+        method = "Read two points, use change in y / change in x, then find c"
+        display = None
+    elif level == 2:
+        title = "Recover a line equation from two points"
+        prompt = "Find the equation of the straight line through the two points. Calculate m and c and assemble y = mx + c. The points are shown without the joining line so you can construct it yourself."
+        first_step = "Two distinct points determine one straight line. Label them A = (x1, y1) and B = (x2, y2); keep each x-value paired with its own y-value."
+        method = "Calculate m from the two points, then use c = y1 - m*x1"
+        display = rf"A=({sp.latex(points[0][0])},{sp.latex(points[0][1])}),\quad B=({sp.latex(points[1][0])},{sp.latex(points[1][1])})"
+    elif level == 3:
+        title = "Recover a line equation from one point and its gradient"
+        prompt = "The gradient and one point are given. Find the missing intercept c and write y = mx + c. Enter the given gradient as m as well."
+        first_step = "The gradient is already known. One point fixes the line's position; a gradient alone would leave infinitely many parallel lines."
+        method = "Use y - y1 = m(x - x1), or substitute the point into y = mx + c"
+        data["visible_points"] = 1
+        display = rf"m={sp.latex(m)},\qquad A=({sp.latex(x1)},{sp.latex(points[0][1])})"
+    elif level == 4:
+        a = sp.Integer(RNG.choice([i for i in range(-8, 9) if i]))
+        b = sp.Integer(RNG.choice([i for i in range(-7, 8) if i]))
+        m, c = -b / a, b
+        points = sorted([(a, sp.Integer(0)), (sp.Integer(0), b)])
+        data.update(m=m, c=c, points=points)
+        title = "Recover a line equation from its intercepts"
+        prompt = "The line crosses the x-axis at the given x-intercept and the y-axis at the given y-intercept. Find m and c and write y = mx + c."
+        display = rf"x\text{{-intercept}}={a},\qquad y\text{{-intercept}}={b}"
+        first_step = f"An x-intercept has y = 0, so the first intercept is ({a}, 0). A y-intercept has x = 0, so the other is (0, {b}). An intercept is a coordinate on an axis, not the gradient."
+        method = "Convert the intercepts to (a, 0) and (0, b), then calculate m"
+        prefix = [("text", "Here c is known immediately: it is the y-coordinate where x = 0. The intercept form is another useful route; both intercepts in this question are nonzero."),
+                  ("latex", rf"\frac{{x}}{{({a})}}+\frac{{y}}{{({b})}}=1"
+                            rf"\quad\Longrightarrow\quad y={sp.latex(m * x + c)}")]
+    elif level == 5:
+        table_x = [sp.Integer(i * denominator) for i in (-2, -1, 0, 1, 2)]
+        table_y = [m * px + c for px in table_x]
+        points = [(table_x[0], table_y[0]), (table_x[1], table_y[1])]
+        data.update(points=points, visible_points=2)
+        table = {"x": [str(v) for v in table_x], "y": [str(v) for v in table_y]}
+        title = "Recover a line equation from a table"
+        prompt = "The table contains exact values, with no measurement noise. Check that the rate of change is constant, then find m and c and write y = mx + c. The first two table rows are marked on the graph."
+        first_step = "Take differences between neighbouring rows. Equal changes in x must give equal changes in y for these exact data to lie on one straight line."
+        method = "Check that change in y / change in x is constant, then find c"
+        display = None
+        dx, dy = table_x[1] - table_x[0], table_y[1] - table_y[0]
+        prefix = [("text", "For every neighbouring pair of rows, the changes are the same. A larger step in x must be divided out; the change in y by itself is not necessarily the gradient."),
+                  ("latex", rf"\Delta x={sp.latex(dx)},\qquad\Delta y={sp.latex(dy)},\qquad\frac{{\Delta y}}{{\Delta x}}={sp.latex(m)}\quad\text{{for all four intervals}}")]
+    elif level == 6:
+        relation = RNG.choice(["parallel", "perpendicular"])
+        ref_m = RNG.choice(slopes)
+        m = ref_m if relation == "parallel" else -1 / ref_m
+        ref_c = c + RNG.choice([-4, -2, 2, 4])
+        x1 = sp.Integer(RNG.choice([-3, -2, -1, 1, 2, 3]))
+        x2 = x1 + int(sp.denom(m)) * 2
+        points = [(x1, m * x1 + c), (x2, m * x2 + c)]
+        data.update(m=m, points=points, visible_points=1, reference=(ref_m, ref_c), relation=relation)
+        title = f"A {relation} line through a point"
+        prompt = f"Find the equation of the line through A that is {relation} to the purple reference line. The required line is not drawn yet. Enter its m and c."
+        display = rf"\text{{Reference: }}y={sp.latex(ref_m * x + ref_c)},\qquad A=({sp.latex(x1)},{sp.latex(points[0][1])})"
+        first_step = "Read the reference gradient from the coefficient of x. Its intercept belongs to the reference line; the new line must use the given point to find its own intercept."
+        method = "Use the same gradient, then substitute A to find c" if relation == "parallel" else "Use the negative reciprocal gradient, then substitute A to find c"
+        prefix = [("heading", "2. Find the required gradient"),
+                  ("text", "Parallel lines have equal gradients. The different intercepts keep these two lines distinct." if relation == "parallel" else "For two nonvertical perpendicular lines with nonzero gradients, the gradients multiply to -1. Take the negative reciprocal, not just the negative."),
+                  ("latex", rf"m=m_{{\rm ref}}={sp.latex(m)}" if relation == "parallel" else
+                   rf"m\,m_{{\rm ref}}=-1\quad\Longrightarrow\quad m=-\frac{{1}}{{m_{{\rm ref}}}}=-\frac{{1}}{{({sp.latex(ref_m)})}}={sp.latex(m)}"),
+                  ("text", "The axes can have different screen scales, so perpendicular lines may not look like a right angle on this display. The gradient calculation is the check.")]
+    elif level == 7:
+        vertical = RNG.choice([True, False])
+        k = sp.Integer(RNG.randint(-6, 6))
+        u1, u2 = sp.Integer(RNG.randint(-5, -1)), sp.Integer(RNG.randint(1, 5))
+        if vertical:
+            m, c = None, None
+            points = [(k, u1), (k, u2)]
+            data.update(m=None, c=None, vertical=k)
+        else:
+            m, c = sp.Integer(0), k
+            points = [(u1, k), (u2, k)]
+            data.update(m=m, c=c)
+        data.update(points=points, given_line=True, label_coordinates=False)
+        title = "Horizontal or vertical: choose the correct form"
+        prompt = "Read the marked points from the graph. Choose the correct equation form, then enter its constant k. A vertical line cannot be written as y = mx + c with a finite gradient."
+        display = None
+        form_answer = "x = k (vertical)" if vertical else "y = k (horizontal)"
+        method = "Check which coordinate stays constant before choosing x = k or y = k"
+        first_step = "Read both marked points and check which coordinate stays constant. The line is vertical if x stays the same, and horizontal if y stays the same."
+        dx, dy = points[1][0] - points[0][0], points[1][1] - points[0][1]
+        equation = line_equation_latex(m, c, vertical=k if vertical else None)
+        solution = [
+            ("heading", "1. Read the coordinates"), ("text", first_step),
+            ("latex", rf"A=({points[0][0]},{points[0][1]}),\qquad B=({points[1][0]},{points[1][1]})"),
+            ("heading", "2. Calculate the changes"),
+            ("latex", rf"\Delta x=({points[1][0]})-({points[0][0]})={dx},\qquad\Delta y=({points[1][1]})-({points[0][1]})={dy}"),
+            ("text", "The horizontal change is zero. The slope formula would divide by zero, so the gradient is undefined; it is not zero and should not be entered as an ordinary number." if vertical else "The vertical change is zero and the horizontal change is nonzero. Therefore m = 0; the y-coordinate never changes."),
+            ("latex", rf"m=\frac{{{dy}}}{{0}}\quad\text{{is undefined}}" if vertical else rf"m=\frac{{0}}{{{dx}}}=0"),
+            ("heading", "3. Write the coordinate that remains constant"),
+            ("text", f"Every point has x = {k}, regardless of y." if vertical else f"Every point has y = {k}, regardless of x."),
+            ("latex", rf"\boxed{{{equation}}}"),
+            ("line_plot", "complete"),
+            ("heading", "4. Verify both points"),
+            ("text", f"Both marked points have {'x' if vertical else 'y'} = {k}, so both satisfy the equation. " +
+             ("A vertical line is not a function y(x), because one x-value has many y-values." if vertical else "A horizontal line is a function y(x) with zero gradient.")),
+            ("text", "Two identical points would not determine a unique line. The generated points here are distinct."),
+        ]
+        return {"title": title, "difficulty": "Essential special cases", "prompt": prompt,
+                "display_equation": display, "formula_question": _line_formula_question(method, first_step),
+                "answers": [line_answer("Constant k", k)], "line_form_answer": form_answer,
+                "line_data": data, "solution": solution, "diagram": ("straight_line", data),
+                "signature": f"SL7:{vertical}:{k}:{u1}:{u2}",
+                "teaching_point": "Horizontal: y = k and m = 0. Vertical: x = k and m is undefined. Never divide by zero."}
+    elif level == 8:
+        aa = sp.Integer(RNG.choice([-6, -4, -3, -2, -1, 1, 2, 3, 4, 6]))
+        bb = sp.Integer(RNG.choice([-5, -3, -2, -1, 1, 2, 3, 5]))
+        cc = sp.Integer(RNG.randint(-9, 9))
+        m, c = -aa / bb, -cc / bb
+        points = [(sp.Integer(0), c), (abs(bb), m * abs(bb) + c)]
+        data.update(m=m, c=c, points=points, visible_points=0, given_line=True,
+                    general_coefficients=(aa, bb, cc))
+        title = "Convert a general equation to y = mx + c"
+        prompt = "Rearrange the given equation to make y the subject. Identify the gradient m and the y-intercept c. The graph shows the same line."
+        display = rf"{sp.latex(aa * x + bb * sp.Symbol('y') + cc)}=0"
+        first_step = "The general form is Ax + By + C = 0. Here B is nonzero, so you can isolate y. Both terms on the other side must be divided by B."
+        method = "Isolate B*y, then divide every term by B"
+        prefix = [("heading", "2. Make y the subject"),
+                  ("latex", rf"({bb})y={sp.latex(-aa * x - cc)}"),
+                  ("text", f"Divide the entire right-hand side by B = {bb}. Keep the sign of B; do not divide only the x-term."),
+                  ("latex", rf"y=\frac{{{sp.latex(-aa * x - cc)}}}{{({bb})}}={sp.latex(m * x + c)}"),
+                  ("latex", rf"m=-\frac{{A}}{{B}}={sp.latex(m)},\qquad c=-\frac{{C}}{{B}}={sp.latex(c)}")]
+    elif level == 9:
+        scenario = RNG.choice(["motion", "load"])
+        if scenario == "motion":
+            x_name, y_name = "t", "v"
+            m = sp.Rational(RNG.choice([-3, -2, -1, 1, 2, 3]), RNG.choice([1, 2]))
+            c = sp.Integer(RNG.randint(2, 8))
+            x1, x2 = sp.Integer(2), sp.Integer(RNG.choice([4, 6, 8]))
+            points = [(x1, m * x1 + c), (x2, m * x2 + c)]
+            data.update(m=m, c=c, points=points, given_line=True,
+                        x_symbol="t", y_symbol="v", x_label="Time t (s)",
+                        y_label="Velocity v (m/s)", nonnegative_x=True)
+            title = "Recover a velocity-time equation"
+            prompt = "The velocity-time graph is straight over the displayed time interval. Read A and B and find v(t) = mt + c. Give m in m/s² and c in m/s, and explain their physical meaning."
+            first_step = "The horizontal axis is time t in seconds, and the vertical axis is velocity v in m/s. The same straight-line method applies with t instead of x and v instead of y."
+            m_unit, c_unit = "m/s²", "m/s"
+            physical = "Here m is the constant acceleration (change in velocity per second), and c is the initial velocity v(0). A negative velocity means motion in the negative direction; it is not a negative speed. Use this model only over the interval where the graph is straight."
+        else:
+            x_name, y_name = "d", "F"
+            m, c = sp.Integer(RNG.randint(1, 5)), sp.Integer(RNG.choice([0, 2, 4, 6]))
+            x1, x2 = sp.Integer(1), sp.Integer(RNG.choice([3, 4, 5]))
+            points = [(x1, m * x1 + c), (x2, m * x2 + c)]
+            data.update(m=m, c=c, points=points, given_line=True,
+                        x_symbol="d", y_symbol="F", x_label="Extension d (mm)",
+                        y_label="Force F (N)", nonnegative_x=True)
+            title = "Recover a force-extension equation"
+            prompt = "The force-extension graph is straight over the displayed range. Read A and B and find F(d) = md + c, using extension d in millimetres. Give m in N/mm and c in N."
+            first_step = "The horizontal axis is extension d in millimetres, and the vertical axis is force F in newtons. Keep these units throughout the gradient calculation."
+            m_unit, c_unit = "N/mm", "N"
+            physical = "Here m is the stiffness over this linear range, and c is the force at zero plotted extension (an offset or preload). A force-extension line need not pass through the origin. To convert stiffness from N/mm to N/m, multiply by 1000."
+        method = "Divide the change in vertical-axis quantity by the change in horizontal-axis quantity, retaining units"
+        display = None
+        prefix = [("text", f"For this graph the model is {y_name} = m{x_name} + c. The letters change, but the method does not.")]
+    else:
+        raise ValueError("Unknown straight-line level")
+
+    solution = [("heading", "1. Identify the known information"), ("text", first_step)] + prefix
+    if level not in (3, 6, 8):
+        solution += [("latex", rf"A=({sp.latex(points[0][0])},{sp.latex(points[0][1])}),\quad B=({sp.latex(points[1][0])},{sp.latex(points[1][1])})")]
+        solution += _line_gradient_steps(points, x_name, y_name)
+    elif level == 3:
+        solution += [("heading", "2. Use the given gradient"),
+                     ("latex", rf"m={sp.latex(m)},\qquad {y_name}-{y_name}_1=m({x_name}-{x_name}_1)"),
+                     ("text", "Point-gradient form describes the line through the given point. Expand it, or use c = y1 - m*x1 to reach slope-intercept form.")]
+
+    px, py = points[0]
+    product = sp.simplify(m * px)
+    solution += [
+        ("heading", "3. Find or confirm the intercept"),
+        ("text", f"The intercept c is the value of {y_name} when {x_name} = 0. It is not generally the {y_name}-coordinate of A. Substitute A and the gradient into the line equation, then isolate c."),
+        ("latex", rf"{y_name}=m{x_name}+c\quad\Longrightarrow\quad c={y_name}-m{x_name}"),
+        ("latex", rf"c=({sp.latex(py)})-({sp.latex(m)})({sp.latex(px)})=({sp.latex(py)})-({sp.latex(product)})={sp.latex(c)}"),
+        ("text", "Subtracting a negative quantity adds its magnitude; the brackets preserve the signs. If the graph includes x = 0, you can also read c directly at the vertical-axis crossing."),
+        ("heading", "4. Assemble the complete equation"),
+        ("text", "Replace m and c by their values. Keep the coordinate variables in the equation: a numerical gradient alone is not a line equation."),
+        ("latex", rf"\boxed{{{line_equation_latex(m, c, x_name, y_name)}}}"),
+        ("line_plot", "complete"),
+        ("heading", "5. Substitute points to check the result"),
+    ]
+    if level in (3, 6):
+        solution += [("text", "Check the supplied point A. B on the recovered graph is an additional constructed point, not a second point supplied in the question.")]
+    elif level == 8:
+        solution += [("text", "The two plotted check points below were constructed from the rearranged equation. Substituting either into the original general equation also gives zero.")]
+    else:
+        solution += [("text", "Each known point must reproduce its y-value. A wrong sign or an incorrect intercept will fail this check.")]
+    for index, (px, py) in enumerate(points):
+        point_name = chr(ord("A") + index)
+        solution += [("latex", rf"{point_name}:\quad ({sp.latex(m)})({sp.latex(px)})+({sp.latex(c)})={sp.latex(sp.simplify(m * px + c))}={sp.latex(py)}\quad\checkmark")]
+        if level == 8:
+            solution += [("latex", rf"({aa})({sp.latex(px)})+({bb})({sp.latex(py)})+({cc})=0\quad\checkmark")]
+    if level == 9:
+        solution += [("heading", "6. Interpret the gradient and intercept with units"),
+                     ("latex", rf"[m]=\frac{{[{y_name}]}}{{[{x_name}]}},\qquad [c]=[{y_name}]"),
+                     ("text", f"m = {m} {m_unit}; c = {c} {c_unit}. {physical}")]
+    if level == 5:
+        solution += [("text", "All five table rows satisfy the same equation. If measured data do not have a constant rate, an exact line may be inappropriate; a fitted line is a separate modelling task.")]
+
+    learning_point = "Use changes, keep the subtraction order consistent, and check the intercept by setting the horizontal variable to zero. Both points must satisfy the recovered equation."
+    if level == 6:
+        learning_point = "Parallel gradients are equal. Nonzero perpendicular gradients are negative reciprocals. A point on the required line determines its intercept."
+    elif level == 8:
+        learning_point = "For Ax + By + C = 0 with B nonzero, m = -A/B and c = -C/B. If B = 0 and A is nonzero, the line is vertical: x = -C/A."
+    elif level == 9:
+        learning_point = physical
+    return {
+        "title": title, "difficulty": "Foundation" if level <= 3 else "Developing application",
+        "prompt": prompt, "display_equation": display,
+        "formula_question": _line_formula_question(method, first_step),
+        "answers": [line_answer("Gradient m", m, m_unit), line_answer("Intercept c", c, c_unit)],
+        "solution": solution, "signature": f"SL{level}:{m}:{c}:{points}:{data.get('reference')}:{x_name}",
+        "diagram": ("straight_line", data), "line_data": data, "table": table,
+        "teaching_point": learning_point,
+    }
+
+
+def render_line_learning():
+    st.markdown("### A line equation tells you how the coordinates are connected")
+    st.latex(r"y=mx+c,\qquad m=\frac{y_2-y_1}{x_2-x_1},\qquad c=y_1-mx_1")
+    st.markdown("**x** is the horizontal coordinate; **y** is the vertical coordinate. "
+                "The **gradient m** tells you how much y changes for each one-unit increase in x. "
+                "The **intercept c** is the y-value where x = 0. It can be positive, negative or zero.")
+    st.markdown("### Explore the gradient and intercept")
+    left, right = st.columns(2)
+    with left:
+        explore_m = st.slider("Gradient m: tilt the line", -3.0, 3.0, 1.0, 0.5, key="line_explore_m")
+    with right:
+        explore_c = st.slider("Intercept c: move the line vertically", -4, 4, 2, key="line_explore_c")
+    example_m, example_c = sp.Rational(str(explore_m)), sp.Integer(explore_c)
+    example = {"m": example_m, "c": example_c, "points": [(sp.Integer(0), example_c),
+               (sp.Integer(2), 2 * example_m + example_c)], "given_line": True,
+               "x_limits": (-4, 4), "y_limits": (-12, 12)}
+    show_straight_line(example, "complete")
+    st.markdown("Change **m** while holding c fixed: the line rotates about its vertical-axis intercept. "
+                "Change **c** while holding m fixed: the line shifts vertically and stays parallel to its previous position.")
+    st.markdown("### Recover an equation: five steps")
+    st.markdown("1. Read the axis labels and units, then identify two exact points if available.\n"
+                "2. Calculate the gradient using **vertical change / horizontal change**.\n"
+                "3. Substitute one point into **c = y − mx**.\n"
+                "4. Write the complete equation, keeping x and y as variables.\n"
+                "5. Substitute both points and check the gradient's sign and units.")
+    st.markdown("### Worked example with a falling line")
+    st.latex(r"A=(-2,5),\quad B=(4,-1)")
+    st.latex(r"m=\frac{(-1)-5}{4-(-2)}=\frac{-6}{6}=-1")
+    st.latex(r"c=5-(-1)(-2)=5-2=3\quad\Longrightarrow\quad\boxed{y=-x+3}")
+    st.latex(r"x=-2:\ y=-(-2)+3=5;\qquad x=4:\ y=-4+3=-1")
+    st.markdown("The negative gradient means y falls by 1 each time x increases by 1. "
+                "The line crosses the y-axis at (0, 3). Notice how subtracting a negative x-coordinate changes the denominator.")
+    st.markdown("### Choose a method from the information available")
+    st.markdown(
+        "| Given information | Method |\n|---|---|\n"
+        "| Graph | Read two well-separated exact points; use the numbered axis scales. |\n"
+        "| Two points | $m=(y_2-y_1)/(x_2-x_1)$, then $c=y_1-mx_1$. |\n"
+        "| One point and gradient | $y-y_1=m(x-x_1)$, or substitute to find $c$. |\n"
+        "| Axis intercepts $a$ and $b$, both nonzero | Use $(a,0)$ and $(0,b)$; equivalently $x/a+y/b=1$. |\n"
+        "| Exact table | Check the same rate $\\Delta y/\\Delta x$ across every interval. |\n"
+        "| Parallel line through a point | Keep the reference gradient, then find the new intercept. |\n"
+        "| Perpendicular line through a point | For nonzero finite gradients, $m_{new}=-1/m_{ref}$. |\n"
+        "| $Ax+By+C=0$, $B\\ne0$ | Isolate $y$: $m=-A/B$, $c=-C/B$. |\n"
+        "| Engineering graph | Use the plotted variables; gradient units are vertical units / horizontal units. |"
+    )
+    st.markdown("### Horizontal and vertical lines need different forms")
+    st.latex(r"\text{Horizontal: }y=k,\quad m=0;\qquad\text{Vertical: }x=k,\quad m\text{ undefined}")
+    st.markdown("A horizontal line has zero vertical change. A vertical line has zero horizontal change, "
+                "so calculating its gradient would require division by zero. A horizontal line and a vertical line are perpendicular. "
+                "Two identical points do not determine a unique line; one point by itself is also insufficient.")
+    st.markdown("### Common mistakes to avoid")
+    st.markdown("- Using $y/x$ instead of $\\Delta y/\\Delta x$; $y/x$ only gives the gradient when the line passes through the origin and $x\\ne0$.\n"
+                "- Reversing the subtraction order for only one coordinate. Reversing both gives the same gradient.\n"
+                "- Reading grid squares without checking the axis values and units.\n"
+                "- Calling a vertical line's gradient zero, or assuming every line passes through (0, 0).\n"
+                "- Losing a negative sign when substituting coordinates or calculating c.\n"
+                "- Giving only m and forgetting to write the complete equation.")
+    st.info("Select a level in the sidebar, then open Problem. New random question generates fresh data. "
+            "In Solve and check, enter a decimal or a fraction such as -2/3. The Solution tab shows the graphical construction and every calculation.")
+
+
 GENERATORS = {
     "Linear equations": generate_linear,
     "Trigonometry": generate_trigonometry,
     "Vector components": generate_vector,
     "Differentiation": generate_differentiation,
     "Integration": generate_integration,
+    "Straight-line equations": generate_straight_line,
 }
 
 
@@ -1954,6 +2485,8 @@ def render_diagram(problem):
         st.pyplot(vector_figure(data), use_container_width=True)
     elif kind == "direction_triangle":
         st.pyplot(direction_triangle_figure(data), use_container_width=True)
+    elif kind == "straight_line":
+        show_straight_line(data)
 
 
 def render_learning(topic):
@@ -1968,7 +2501,10 @@ def render_learning(topic):
         unsafe_allow_html=True,
     )
 
-    if topic == "Linear equations":
+    if topic == "Straight-line equations":
+        render_line_learning()
+
+    elif topic == "Linear equations":
         st.markdown("### Balancing an equation")
         st.latex(r"ax+b=c")
         st.latex(r"ax=c-b")
@@ -2141,6 +2677,81 @@ def award_xp(problem_id, points):
     if problem_id not in completed:
         completed.add(problem_id)
         st.session_state["xp"] = st.session_state.get("xp", 0) + points
+
+
+def check_final_answers(problem, mode, entered, line_form=None):
+    """Check coefficients and, for special cases, the chosen equation form."""
+    values = {}
+    invalid = False
+    for index, answer in enumerate(problem["answers"]):
+        try:
+            values[index] = (
+                line_number_input(entered[index])
+                if problem.get("line_data") else entered[index]
+            )
+        except ValueError as exc:
+            st.warning(f"{answer['label']}: {exc}")
+            invalid = True
+    if invalid:
+        return
+
+    form_correct = True
+    if problem.get("line_form_answer"):
+        if line_form == "Choose an equation form":
+            st.warning("Choose horizontal or vertical as well as entering the constant k.")
+            return
+        form_correct = line_form == problem["line_form_answer"]
+        if form_correct:
+            st.success("Correct equation form.")
+        else:
+            st.warning("Check which coordinate stays constant: x gives a vertical line; y gives a horizontal line.")
+
+    results = [close_enough(values[i], answer) for i, answer in enumerate(problem["answers"])]
+    for result, answer in zip(results, problem["answers"]):
+        if result:
+            st.markdown(f"<div class='good'>{answer['label']}: correct.</div>", unsafe_allow_html=True)
+        elif mode == "Practice":
+            expected = fmt(answer["value"], 5)
+            unit = f" {answer['unit']}" if answer["unit"] else ""
+            st.markdown(f"<div class='bad'>{answer['label']}: check again. "
+                        f"Expected approximately {expected}{unit}.</div>", unsafe_allow_html=True)
+        else:
+            st.markdown(f"<div class='bad'>{answer['label']}: check the formula, signs and arithmetic.</div>",
+                        unsafe_allow_html=True)
+
+    if all(results) and form_correct:
+        st.success("Excellent — all answers are correct.")
+        award_xp(f"{problem['uid']}_answers", 35)
+
+    if problem.get("line_data"):
+        data = problem["line_data"]
+        # Keep a typed fraction exact in the assembled equation.
+        display_values = {}
+        for index in values:
+            raw = "".join(str(entered[index]).strip().replace("−", "-").split())
+            fraction = _line_input_fraction(raw)
+            display_values[index] = (
+                sp.Rational(fraction.numerator, fraction.denominator)
+                if "/" in raw or fraction.denominator == 1 else sp.Float(raw)
+            )
+        if problem.get("line_form_answer"):
+            k = values[0]
+            candidate = {"vertical": k} if line_form == "x = k (vertical)" else {"m": 0, "c": k}
+            display_m, display_c = sp.Integer(0), display_values[0]
+            display_vertical = display_values[0] if line_form == "x = k (vertical)" else None
+        else:
+            candidate = {"m": values[0], "c": values[1]}
+            display_m, display_c = display_values[0], display_values[1]
+            display_vertical = None
+        st.markdown("### The equation from your entries")
+        st.latex(line_equation_latex(
+            display_m, display_c,
+            data.get("x_symbol", "x"), data.get("y_symbol", "y"),
+            display_vertical,
+        ))
+        if mode == "Practice":
+            st.caption("The orange dotted line is your equation. Check whether it passes through the known points and has the required direction.")
+            show_straight_line(data, candidate=candidate)
 
 
 # -----------------------------------------------------------------------------
@@ -2344,6 +2955,9 @@ level = st.sidebar.selectbox(
     "Level",
     level_options,
     index=level_options.index(restored_level),
+    format_func=lambda value: (
+        f"{value}. {LINE_LEVELS[value]}" if topic == "Straight-line equations" else str(value)
+    ),
 )
 level = int(level)
 
@@ -2386,6 +3000,11 @@ elif new_question:
     )
     question_state["index"] = len(question_state["seeds"]) - 1
     question_state = _save_question_state(question_state)
+
+if previous_question or next_question or new_question:
+    # Refresh navigation controls using the updated index, so Previous/Next
+    # immediately reflect the newly displayed question.
+    st.rerun()
 
 current_seed = question_state["seeds"][question_state["index"]]
 problem = build_problem_from_seed(topic, level, current_seed)
@@ -2447,6 +3066,9 @@ with tabs[1]:
 
         if problem.get("display_equation"):
             st.latex(problem["display_equation"])
+
+        if problem.get("table"):
+            st.table(problem["table"])
 
         st.markdown(
             """
@@ -2516,6 +3138,17 @@ with tabs[3]:
         )
 
     entered = {}
+    line_form = None
+    if problem.get("line_data"):
+        st.info("Write your complete equation on paper. Enter its coefficients below as decimals or fractions "
+                "(for example, -2/3). Use at least four decimal places for recurring decimals. "
+                "Checking your entries will assemble the complete equation.")
+    if problem.get("line_form_answer"):
+        line_form = st.selectbox(
+            "Equation form",
+            ["Choose an equation form", "y = k (horizontal)", "x = k (vertical)"],
+            key=f"{problem['uid']}_line_form",
+        )
 
     columns = st.columns(min(2, len(problem["answers"])))
 
@@ -2525,48 +3158,25 @@ with tabs[3]:
             if answer["unit"]:
                 label += f" ({answer['unit']})"
 
-            entered[index] = st.number_input(
-                label,
-                value=0.0,
-                format="%.5f",
-                key=f"{problem['uid']}_answer_{index}",
-            )
+            if problem.get("line_data"):
+                entered[index] = st.text_input(
+                    label, value="", placeholder="Number or fraction, e.g. -2/3",
+                    key=f"{problem['uid']}_answer_{index}",
+                )
+            else:
+                entered[index] = st.number_input(
+                    label,
+                    value=0.0,
+                    format="%.5f",
+                    key=f"{problem['uid']}_answer_{index}",
+                )
 
     if st.button(
         "Check final answer",
         type="primary",
         key=f"{problem['uid']}_check_answers",
     ):
-        results = [
-            close_enough(entered[i], answer)
-            for i, answer in enumerate(problem["answers"])
-        ]
-
-        for result, answer in zip(results, problem["answers"]):
-            if result:
-                st.markdown(
-                    f"<div class='good'>{answer['label']}: correct.</div>",
-                    unsafe_allow_html=True,
-                )
-            else:
-                if mode == "Practice":
-                    expected = fmt(answer["value"], 5)
-                    unit = f" {answer['unit']}" if answer["unit"] else ""
-                    st.markdown(
-                        f"<div class='bad'>{answer['label']}: check again. "
-                        f"Expected approximately {expected}{unit}.</div>",
-                        unsafe_allow_html=True,
-                    )
-                else:
-                    st.markdown(
-                        f"<div class='bad'>{answer['label']}: check the formula, "
-                        f"signs and arithmetic.</div>",
-                        unsafe_allow_html=True,
-                    )
-
-        if all(results):
-            st.success("Excellent — all answers are correct.")
-            award_xp(f"{problem['uid']}_answers", 35)
+        check_final_answers(problem, mode, entered, line_form)
 
     st.markdown("### Reasonableness check")
     st.write(problem["teaching_point"])
@@ -2597,6 +3207,9 @@ with tabs[4]:
         if problem.get("display_equation"):
             st.latex(problem["display_equation"])
 
+        if problem.get("table"):
+            st.table(problem["table"])
+
         if problem.get("diagram"):
             render_diagram(problem)
 
@@ -2615,6 +3228,10 @@ with tabs[4]:
         for kind, content in problem["solution"]:
             if kind == "latex":
                 st.latex(content)
+            elif kind == "heading":
+                st.markdown(f"### {content}")
+            elif kind == "line_plot":
+                show_straight_line(problem["line_data"], content)
             else:
                 st.write(content)
 
